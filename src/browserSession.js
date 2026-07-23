@@ -1,0 +1,163 @@
+const { chromium } = require('playwright');
+
+const BASE_URL = 'https://reservations.ontarioparks.ca/';
+const USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+function parseIsoDate(isoStr) {
+  const [year, month, day] = isoStr.split('-').map(Number);
+  return { year, month, day }; // month is 1-based here
+}
+
+async function launchBrowser({ headless = true } = {}) {
+  const browser = await chromium.launch({ headless });
+  const context = await browser.newContext({ userAgent: USER_AGENT });
+  const page = await context.newPage();
+  page.setDefaultTimeout(20000);
+  return { browser, context, page };
+}
+
+async function openHomeAndConsent(page) {
+  await page.goto(BASE_URL, { waitUntil: 'networkidle', timeout: 45000 });
+  try {
+    await page.click('text=I Consent', { timeout: 5000 });
+  } catch (e) {
+    // Consent banner not shown (already accepted, or not present) - fine.
+  }
+  await page.waitForTimeout(800);
+}
+
+async function resolveParkOptions(page, searchTerm) {
+  await page.click('#park-autocomplete-input');
+  await page.fill('#park-autocomplete-input', '');
+  await page.fill('#park-autocomplete-input', searchTerm);
+  await page.waitForTimeout(1200);
+  const options = await page.$$eval('[role="option"]', (els) => els.map((e) => e.textContent.trim()));
+  await page.keyboard.press('Escape').catch(() => {});
+  await page.waitForTimeout(200);
+  return options;
+}
+
+async function readCurrentCalendarMonth(page) {
+  const label = await page.getAttribute('#monthDropdownPicker', 'aria-label');
+  const match = label && label.match(/^([A-Za-z]+) (\d{4}),/);
+  if (!match) throw new Error(`Could not read calendar month from label: ${label}`);
+  return { monthIndex: MONTH_NAMES.indexOf(match[1]), year: Number(match[2]) };
+}
+
+async function navigateCalendarToMonth(page, targetYear, targetMonthIndex) {
+  for (let guard = 0; guard < 36; guard += 1) {
+    const { monthIndex, year } = await readCurrentCalendarMonth(page);
+    const currentTotal = year * 12 + monthIndex;
+    const targetTotal = targetYear * 12 + targetMonthIndex;
+    if (currentTotal === targetTotal) return;
+    const buttonClass = currentTotal < targetTotal ? 'button.next-button' : 'button.prev-button';
+    await page.click(buttonClass);
+    await page.waitForTimeout(250);
+  }
+  throw new Error('Could not navigate the date picker to the target month after 36 attempts');
+}
+
+async function clickCalendarDay(page, { year, month, day }) {
+  const label = `${MONTH_NAMES[month - 1]} ${day}, ${year}`;
+  await page.click(`button[aria-label="${label}"]`, { timeout: 8000 });
+}
+
+async function setDateRange(page, arrivalIso, departureIso) {
+  await page.click('#arrival-date-field');
+  await page.waitForTimeout(400);
+
+  const arrival = parseIsoDate(arrivalIso);
+  const departure = parseIsoDate(departureIso);
+
+  await navigateCalendarToMonth(page, arrival.year, arrival.month - 1);
+  await clickCalendarDay(page, arrival);
+  await page.waitForTimeout(300);
+
+  await navigateCalendarToMonth(page, departure.year, departure.month - 1);
+  await clickCalendarDay(page, departure);
+  await page.waitForTimeout(400);
+
+  await page.keyboard.press('Escape').catch(() => {});
+}
+
+async function setEquipment(page, equipmentLabel) {
+  await page.click('#equipment-field');
+  await page.waitForTimeout(500);
+  await page.click(`[role="option"]:has-text("${equipmentLabel}")`, { timeout: 8000 });
+  await page.keyboard.press('Escape').catch(() => {});
+  await page.waitForTimeout(200);
+}
+
+async function setPartySize(page, partySize) {
+  await page.fill('#party-size-field', String(partySize));
+}
+
+function extractResultSnippet(bodyText) {
+  const startMarkers = ['List\n', 'Map\n'];
+  const endMarkers = ['\nSimilar', '\nSupport'];
+  let start = -1;
+  for (const marker of startMarkers) {
+    const idx = bodyText.indexOf(marker);
+    if (idx !== -1) { start = idx + marker.length; break; }
+  }
+  if (start === -1) start = 0;
+  let end = bodyText.length;
+  for (const marker of endMarkers) {
+    const idx = bodyText.indexOf(marker, start);
+    if (idx !== -1 && idx < end) end = idx;
+  }
+  return bodyText.slice(start, end).trim().slice(0, 600);
+}
+
+async function selectPark(page, parkOptionText) {
+  await page.click('#park-autocomplete-input');
+  await page.fill('#park-autocomplete-input', '');
+  await page.fill('#park-autocomplete-input', parkOptionText);
+  await page.waitForTimeout(1000);
+  await page.click(`[role="option"]:has-text("${parkOptionText}")`, { timeout: 8000 });
+  await page.waitForTimeout(400);
+}
+
+async function switchToListView(page) {
+  try {
+    await page.click('button:has-text("List"), [role="tab"]:has-text("List")', { timeout: 5000 });
+    await page.waitForTimeout(1500);
+  } catch (e) {
+    // Already in list view, or the toggle wasn't found - proceed with whatever is on screen.
+  }
+}
+
+async function checkAvailability(page, watch, parkOptionText) {
+  await selectPark(page, parkOptionText);
+  await setDateRange(page, watch.arrivalDate, watch.departureDate);
+  await setEquipment(page, watch.equipment);
+  await setPartySize(page, watch.partySize);
+
+  await page.click('#actionSearch');
+  await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(2500);
+
+  await switchToListView(page);
+
+  const bodyText = await page.evaluate(() => document.body.innerText);
+  const noneAvailable =
+    bodyText.includes('No Available Sites') || bodyText.includes('There are no available sites');
+
+  return {
+    available: !noneAvailable,
+    snippet: extractResultSnippet(bodyText),
+  };
+}
+
+module.exports = {
+  launchBrowser,
+  openHomeAndConsent,
+  resolveParkOptions,
+  checkAvailability,
+};

@@ -1,0 +1,14 @@
+{
+  "name": "park-bot",
+  "version": "1.0.0",
+  "description": "Watches Ontario Parks reservations for openings and pops up an alert when one is found.",
+  "private": true,
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "postinstall": "playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  }
+}

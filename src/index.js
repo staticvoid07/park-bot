@@ -1,0 +1,130 @@
+const fs = require('fs');
+const path = require('path');
+
+const { launchBrowser, openHomeAndConsent, resolveParkOptions, checkAvailability } = require('./browserSession');
+const { showPopup } = require('./notifyPopup');
+const { sendNtfyPush } = require('./notifyPush');
+
+const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
+const LOG_DIR = path.join(__dirname, '..', 'logs');
+
+function log(message) {
+  console.log(`[${new Date().toLocaleString()}] ${message}`);
+}
+
+function loadConfig() {
+  let raw;
+  try {
+    raw = fs.readFileSync(CONFIG_PATH, 'utf8');
+  } catch (e) {
+    throw new Error(`Could not find config.json at ${CONFIG_PATH}. Did you rename or move it?`);
+  }
+  let config;
+  try {
+    config = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(
+      `config.json has a formatting mistake and could not be read: ${e.message}\n` +
+        'Common causes: a missing comma between entries, or a missing quote. ' +
+        'Try pasting the file into an online JSON validator to find the exact spot.'
+    );
+  }
+  if (!Array.isArray(config.watches) || config.watches.length === 0) {
+    throw new Error('config.json must have a "watches" list with at least one entry.');
+  }
+  for (const watch of config.watches) {
+    for (const field of ['park', 'arrivalDate', 'departureDate', 'partySize', 'equipment']) {
+      if (watch[field] === undefined) {
+        throw new Error(`Each entry in "watches" needs a "${field}" field. Check config.json.`);
+      }
+    }
+  }
+  const notify = config.notify || {};
+  return {
+    checkEveryMinutes: config.checkEveryMinutes || 15,
+    watches: config.watches,
+    notify: {
+      popup: notify.popup !== false,
+      ntfyTopic: notify.ntfyTopic || '',
+    },
+  };
+}
+
+function saveErrorScreenshot(page, label) {
+  return page
+    .screenshot({ path: path.join(LOG_DIR, `error-${label}-${Date.now()}.png`) })
+    .catch(() => {});
+}
+
+async function runOneCycle(page, watches, notify) {
+  for (const watch of watches) {
+    for (const parkOptionText of watch.resolvedParks) {
+      const description = `${parkOptionText} (${watch.arrivalDate} to ${watch.departureDate})`;
+      try {
+        const result = await checkAvailability(page, watch, parkOptionText);
+        if (result.available) {
+          log(`AVAILABLE: ${description}`);
+          const title = 'Campsite available!';
+          const message = `${parkOptionText}\n${watch.arrivalDate} to ${watch.departureDate}\n\n${result.snippet}`;
+          if (notify.popup) showPopup(title, message);
+          if (notify.ntfyTopic) await sendNtfyPush(notify.ntfyTopic, title, message);
+        } else {
+          log(`not available: ${description}`);
+        }
+      } catch (e) {
+        log(`ERROR checking ${description}: ${e.message}`);
+        await saveErrorScreenshot(page, parkOptionText.replace(/[^a-z0-9]/gi, '_'));
+      }
+    }
+  }
+}
+
+async function main() {
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+
+  log('Starting park-bot...');
+  const config = loadConfig();
+
+  const { browser, page } = await launchBrowser({ headless: true });
+  await openHomeAndConsent(page);
+
+  log('Resolving park names from config.json...');
+  for (const watch of config.watches) {
+    const options = await resolveParkOptions(page, watch.park);
+    if (options.length === 0) {
+      log(`WARNING: no parks matched "${watch.park}" - this watch will do nothing. Check the spelling in config.json.`);
+    } else {
+      log(`"${watch.park}" matched: ${options.join(', ')}`);
+    }
+    watch.resolvedParks = options;
+  }
+
+  if (config.notify.ntfyTopic) {
+    log(`Sending a startup test push to ntfy topic "${config.notify.ntfyTopic}"...`);
+    await sendNtfyPush(
+      config.notify.ntfyTopic,
+      'Park Bot started',
+      'If you see this, your push notifications are set up correctly.'
+    );
+  }
+
+  const intervalMs = config.checkEveryMinutes * 60 * 1000;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    log('Checking availability...');
+    await runOneCycle(page, config.watches, config.notify);
+    log(`Done. Next check in ${config.checkEveryMinutes} minutes. Leave this window open.`);
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  // eslint-disable-next-line no-unreachable
+  await browser.close();
+}
+
+main().catch((e) => {
+  console.error('park-bot crashed:', e.message);
+  console.error('This window will stay open so you can read the error above.');
+  console.error('Press Ctrl+C to close it.');
+  setInterval(() => {}, 1 << 30); // keep the process (and window) alive so the error is visible
+});

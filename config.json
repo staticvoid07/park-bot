@@ -1,0 +1,22 @@
+{
+  "//": "This is the file you edit. Save it and (re)start the bot for changes to take effect.",
+
+  "checkEveryMinutes": 15,
+
+  "notify": {
+    "//": "popup shows an always-on-top window on this computer. ntfyTopic is optional - see README for how to set up push notifications on your phone.",
+    "popup": true,
+    "ntfyTopic": ""
+  },
+
+  "watches": [
+    {
+      "//": "'park' can be a partial name. \"Algonquin\" will automatically match all 9 Algonquin campgrounds.",
+      "park": "Algonquin",
+      "arrivalDate": "2026-08-01",
+      "departureDate": "2026-08-03",
+      "partySize": 1,
+      "equipment": "Single Tent"
+    }
+  ]
+}
