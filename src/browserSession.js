@@ -36,15 +36,20 @@ async function openHomeAndConsent(page) {
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     await page.goto(BASE_URL, { waitUntil: 'networkidle', timeout: 45000 });
 
-    for (const consentText of ['text=I Consent', 'text=Accept', 'text=Accept All', 'text=I Agree']) {
-      try {
-        await page.click(consentText, { timeout: 3000 });
-        break;
-      } catch (e) {
-        // That particular consent wording wasn't shown - try the next, or none may be needed.
+    // The same page/context is reused across every check in a session, so once the consent
+    // cookie is set it stays set - no need to keep re-attempting clicks (previously up to four
+    // 3-second timeouts, ~12s wasted) on a banner that's already gone after the first check.
+    if (!page.__consentHandled) {
+      for (const consentText of ['text=I Consent', 'text=Accept', 'text=Accept All', 'text=I Agree']) {
+        try {
+          await page.click(consentText, { timeout: 800 });
+          break;
+        } catch (e) {
+          // That particular consent wording wasn't shown - try the next, or none may be needed.
+        }
       }
+      page.__consentHandled = true;
     }
-    await page.waitForTimeout(800);
 
     try {
       await page.waitForSelector('#park-autocomplete-input', { timeout: 20000 });
@@ -70,10 +75,9 @@ async function resolveParkOptions(page, searchTerm) {
   await page.click('#park-autocomplete-input');
   await page.fill('#park-autocomplete-input', '');
   await page.fill('#park-autocomplete-input', searchTerm);
-  await page.waitForTimeout(1200);
+  await page.waitForSelector('[role="option"]', { timeout: 5000 }).catch(() => {});
   const options = await page.$$eval('[role="option"]', (els) => els.map((e) => e.textContent.trim()));
   await page.keyboard.press('Escape').catch(() => {});
-  await page.waitForTimeout(200);
   return options;
 }
 
@@ -92,7 +96,7 @@ async function navigateCalendarToMonth(page, targetYear, targetMonthIndex) {
     if (currentTotal === targetTotal) return;
     const buttonClass = currentTotal < targetTotal ? 'button.next-button' : 'button.prev-button';
     await page.click(buttonClass);
-    await page.waitForTimeout(250);
+    await page.waitForTimeout(150);
   }
   throw new Error('Could not navigate the date picker to the target month after 36 attempts');
 }
@@ -104,28 +108,27 @@ async function clickCalendarDay(page, { year, month, day }) {
 
 async function setDateRange(page, arrivalIso, departureIso) {
   await page.click('#arrival-date-field');
-  await page.waitForTimeout(400);
+  await page.waitForSelector('#monthDropdownPicker', { timeout: 5000 });
 
   const arrival = parseIsoDate(arrivalIso);
   const departure = parseIsoDate(departureIso);
 
   await navigateCalendarToMonth(page, arrival.year, arrival.month - 1);
   await clickCalendarDay(page, arrival);
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(200);
 
   await navigateCalendarToMonth(page, departure.year, departure.month - 1);
   await clickCalendarDay(page, departure);
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(200);
 
   await page.keyboard.press('Escape').catch(() => {});
 }
 
 async function setEquipment(page, equipmentLabel) {
   await page.click('#equipment-field');
-  await page.waitForTimeout(500);
+  await page.waitForSelector('[role="option"]', { timeout: 5000 });
   await page.click(`[role="option"]:has-text("${equipmentLabel}")`, { timeout: 8000 });
   await page.keyboard.press('Escape').catch(() => {});
-  await page.waitForTimeout(200);
 }
 
 async function setPartySize(page, partySize) {
@@ -153,18 +156,51 @@ async function selectPark(page, parkOptionText) {
   await page.click('#park-autocomplete-input');
   await page.fill('#park-autocomplete-input', '');
   await page.fill('#park-autocomplete-input', parkOptionText);
-  await page.waitForTimeout(1000);
+  await page.waitForSelector('[role="option"]', { timeout: 5000 });
   await page.click(`[role="option"]:has-text("${parkOptionText}")`, { timeout: 8000 });
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(200);
 }
 
 async function switchToListView(page) {
   try {
     await page.click('button:has-text("List"), [role="tab"]:has-text("List")', { timeout: 5000 });
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(600);
   } catch (e) {
     // Already in list view, or the toggle wasn't found - proceed with whatever is on screen.
   }
+}
+
+// Fast pre-check: search "All Parks" (the park field's default, untouched state) and see whether
+// the given park name appears at all in the root results list. Confirmed against known
+// ground-truth dates that this is reliable *only* when done this way: the initial "Search" click
+// alone can return stale data, but reloading the results page afterwards makes it recompute
+// correctly - a park with zero matching availability disappears from the list entirely, one that
+// has any match appears with "Available". This is currently only known to be trustworthy for
+// "Algonquin" specifically, which shows up as its own top-level entry in that list (most other
+// park names are nested inside a region and would never appear here regardless of availability -
+// callers must not use this for those, since an "absent" result would be meaningless for them).
+async function checkParkListedAtRootLevel(page, watch, parkNameSubstring) {
+  await setDateRange(page, watch.arrivalDate, watch.departureDate);
+  await setEquipment(page, watch.equipment);
+  await setPartySize(page, watch.partySize);
+
+  await page.click('#actionSearch');
+  await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(1000);
+
+  await page.reload({ waitUntil: 'networkidle', timeout: 45000 });
+  await page.waitForTimeout(1200);
+
+  await switchToListView(page);
+
+  const bodyText = await page.evaluate(() => document.body.innerText);
+  const needle = parkNameSubstring.trim().toLowerCase();
+  const listed = bodyText
+    .split('\n')
+    .map((line) => line.trim().toLowerCase())
+    .some((line) => line === needle);
+
+  return { listed };
 }
 
 async function checkAvailability(page, watch, parkOptionText) {
@@ -175,7 +211,7 @@ async function checkAvailability(page, watch, parkOptionText) {
 
   await page.click('#actionSearch');
   await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
-  await page.waitForTimeout(2500);
+  await page.waitForTimeout(1200);
 
   await switchToListView(page);
 
@@ -194,4 +230,5 @@ module.exports = {
   openHomeAndConsent,
   resolveParkOptions,
   checkAvailability,
+  checkParkListedAtRootLevel,
 };

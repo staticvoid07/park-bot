@@ -29,6 +29,7 @@ Open `config.json` in Notepad (Windows) or any text editor (Linux) and edit it. 
 ```json
 {
   "checkEveryMinutes": 15,
+  "showBrowser": false,
   "notify": {
     "popup": true,
     "ntfyTopic": ""
@@ -55,6 +56,9 @@ Open `config.json` in Notepad (Windows) or any text editor (Linux) and edit it. 
   `Single Tent`, `2 Tents`, `3 Tents`, `Trailer or RV up to 18ft (5.5m)`,
   `Trailer or RV up to 25ft (7.6m)`, `Trailer or RV up to 32ft (9.7m)`,
   `Trailer or RV over 32ft (9.7m)`.
+- **showBrowser** — set to `true` to watch the bot work in a visible browser window instead of
+  running invisibly in the background. Useful for troubleshooting or just seeing it in action;
+  leave it `false` for normal day-to-day use (invisible is lighter and doesn't get in your way).
 
 You can add more than one entry to `watches` (comma-separated) if you want to track several
 parks or date ranges at once — just copy the `{ ... }` block and adjust it.
@@ -108,6 +112,12 @@ change to take effect.
   (roughly 20-25 seconds per campground) but means every result can be trusted.
 - Because of that, `checkEveryMinutes` needs to be comfortably longer than
   (number of campgrounds being watched × ~25 seconds), or checks will just run back-to-back
-  with no rest between them. For "Algonquin" (9 campgrounds, ~4 minutes per full check), the
-  default of 15 minutes has plenty of margin; if you're watching many parks at once, raise it
-  accordingly.
+  with no rest between them. If you're watching many parks at once, raise it accordingly - the
+  default of 15 minutes has plenty of margin for a typical single-park watch.
+- If you're watching `"Algonquin"` specifically, checks are much faster (~25-30 seconds total):
+  the bot does one search to see whether Algonquin shows up at all as having *anything* open
+  across its 9 campgrounds, and alerts you straight from that - it doesn't say which specific
+  campground, just that something opened up, so you'll want to check the website yourself to see
+  which one and grab it. This shortcut only exists for Algonquin, since it's the one park
+  confirmed (against known real dates) to behave reliably this way - other parks always check
+  each campground individually and report exactly which site is open.

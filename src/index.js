@@ -1,7 +1,13 @@
 const fs = require('fs');
 const path = require('path');
 
-const { launchBrowser, openHomeAndConsent, resolveParkOptions, checkAvailability } = require('./browserSession');
+const {
+  launchBrowser,
+  openHomeAndConsent,
+  resolveParkOptions,
+  checkAvailability,
+  checkParkListedAtRootLevel,
+} = require('./browserSession');
 const { showPopup } = require('./notifyPopup');
 const { sendNtfyPush } = require('./notifyPush');
 
@@ -53,6 +59,7 @@ function loadConfig() {
   const notify = config.notify || {};
   return {
     checkEveryMinutes: config.checkEveryMinutes || 15,
+    showBrowser: config.showBrowser === true,
     watches: config.watches,
     notify: {
       popup: notify.popup !== false,
@@ -68,8 +75,43 @@ function saveErrorScreenshot(page, label) {
     .catch(() => {});
 }
 
+// "Algonquin" is confirmed (tested against known ground-truth dates) to appear as its own
+// top-level entry in the site's "All Parks" results list, and to disappear from that list
+// entirely when nothing across its 9 campgrounds matches the search criteria. That means one
+// search can stand in for checking all 9 individually whenever nothing's available. Other park
+// names are nested inside a region in that same view and would never appear there regardless of
+// availability, so this fast path must not be applied to them - only "Algonquin" is currently
+// known to be safe here.
+const ROOT_LEVEL_FAST_CHECK_PARK_NAME = 'algonquin';
+
 async function runOneCycle(page, watches, notify) {
   for (const watch of watches) {
+    const eligibleForFastCheck =
+      watch.resolvedParks.length > 1 && watch.park.trim().toLowerCase() === ROOT_LEVEL_FAST_CHECK_PARK_NAME;
+
+    if (eligibleForFastCheck) {
+      const description = `${watch.park} (${watch.arrivalDate} to ${watch.departureDate})`;
+      try {
+        await openHomeAndConsent(page);
+        const { listed } = await checkParkListedAtRootLevel(page, watch, watch.park);
+        if (listed) {
+          log(`AVAILABLE: ${description} (fast check across all ${watch.resolvedParks.length} campgrounds)`);
+          const title = 'Campsite available!';
+          const message = `${watch.park}\n${watch.arrivalDate} to ${watch.departureDate}\n\nSomething is available - check the website to see which campground.`;
+          if (notify.popup) showPopup(title, message);
+          if (notify.ntfyTopic) await sendNtfyPush(notify.ntfyTopic, title, message);
+        } else {
+          log(`not available: ${description} (fast check across all ${watch.resolvedParks.length} campgrounds)`);
+        }
+        continue; // The fast check alone is the full answer for this watch - no need to check each campground individually.
+      } catch (e) {
+        log(`ERROR on fast check for ${description}: ${e.message} - checking each campground individually instead.`);
+        await saveErrorScreenshot(page, 'fast-check');
+        // Fall through to the detailed per-campground loop below as a safety net, so a bug in
+        // the fast path can never cause a real opening to be missed.
+      }
+    }
+
     for (const parkOptionText of watch.resolvedParks) {
       const description = `${parkOptionText} (${watch.arrivalDate} to ${watch.departureDate})`;
       try {
@@ -114,7 +156,7 @@ async function resolveAllParks(page, watches) {
 // Runs one full session: launch a browser, set it up, then check forever on a timer.
 // Throws if anything goes wrong so the caller can restart a fresh session.
 async function runSession(config) {
-  const { browser, page } = await launchBrowser({ headless: true });
+  const { browser, page } = await launchBrowser({ headless: !config.showBrowser });
   try {
     await openHomeAndConsent(page);
     await resolveAllParks(page, config.watches);
