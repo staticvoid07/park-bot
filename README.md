@@ -7,14 +7,20 @@ website.
 
 ## One-time setup
 
-You need [Node.js](https://nodejs.org/) installed first (the regular "LTS" download button on
-that site — just run the installer with all the defaults).
-
 **Windows:** double-click `setup.bat`.
 **Linux:** open a terminal in this folder and run `./setup.sh`.
 
-This downloads everything the bot needs (including its own private copy of a web browser).
-It only needs to be done once, and takes a few minutes.
+This installs everything the bot needs, including Node.js itself if it isn't already on
+your computer, and its own private copy of a web browser. It only needs to be done once,
+and takes a few minutes.
+
+- On Windows, if Node.js has to be installed for the first time, the script will say so
+  and ask you to close the window and double-click `setup.bat` again to finish (this is
+  a one-time extra step, only the very first time).
+- On Linux, installing Node.js or the browser's system libraries may ask for your
+  password — that's expected, it's just installing software.
+- If automatic install doesn't work for some reason, the script will tell you to grab
+  Node.js yourself from [nodejs.org](https://nodejs.org/) (the "LTS" button) and try again.
 
 ## Configure what to watch
 
