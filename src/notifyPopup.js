@@ -11,6 +11,17 @@ function escapeForVbsQuotedString(str) {
   return String(str).replace(/"/g, '""');
 }
 
+// Classic VBScript string literals cannot contain a literal newline - the whole literal must sit
+// on one source line, or the parser fails with "Unterminated string constant". Multi-line text
+// (which every alert message here has) needs to be built as several quoted segments joined by the
+// vbCrLf constant instead, e.g. "line one" & vbCrLf & "line two".
+function toVbsStringExpression(str) {
+  return String(str)
+    .split('\n')
+    .map((line) => `"${escapeForVbsQuotedString(line)}"`)
+    .join(' & vbCrLf & ');
+}
+
 function runDetachedScript({ scriptPath, contents, encoding, command, args, label, onSpawnError }) {
   try {
     fs.writeFileSync(scriptPath, contents, encoding);
@@ -55,7 +66,7 @@ function runDetachedScript({ scriptPath, contents, encoding, command, args, labe
 // a more reliable "can't miss it" guarantee than anything WinForms offers here. wscript.exe
 // ships on every Windows edition, including Home.
 function showWindowsPopupViaVbs(title, message, onSpawnError) {
-  const vbs = `MsgBox "${escapeForVbsQuotedString(message)}", vbOKOnly + vbInformation + vbSystemModal, "${escapeForVbsQuotedString(title)}"`;
+  const vbs = `MsgBox ${toVbsStringExpression(message)}, vbOKOnly + vbInformation + vbSystemModal, ${toVbsStringExpression(title)}`;
   const scriptPath = path.join(os.tmpdir(), `park-bot-alert-${Date.now()}-${Math.random().toString(36).slice(2)}.vbs`);
 
   // WSH reliably reads .vbs files as UTF-16LE when a BOM is present - the standard, well-supported
