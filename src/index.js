@@ -156,6 +156,15 @@ async function main() {
   }
 }
 
+// Last-resort safety net: a bug anywhere (e.g. a notification helper) should never be able to
+// silently kill an otherwise-healthy 24/7 bot. Log it and keep running instead of crashing.
+process.on('uncaughtException', (e) => {
+  log(`UNEXPECTED ERROR (recovered, bot keeps running): ${e && e.stack ? e.stack : e}`);
+});
+process.on('unhandledRejection', (e) => {
+  log(`UNEXPECTED ERROR (recovered, bot keeps running): ${e && e.stack ? e.stack : e}`);
+});
+
 main().catch((e) => {
   console.error('park-bot could not start:', e.message);
   console.error('This window will stay open so you can read the error above.');

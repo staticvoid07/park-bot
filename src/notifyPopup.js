@@ -1,5 +1,7 @@
 const { spawn } = require('child_process');
+const fs = require('fs');
 const os = require('os');
+const path = require('path');
 
 function escapeForPowerShellSingleQuotes(str) {
   return String(str).replace(/'/g, "''");
@@ -12,12 +14,32 @@ function showWindowsPopup(title, message) {
     '$form.TopMost = $true',
     '$form.StartPosition = "CenterScreen"',
     `[System.Windows.Forms.MessageBox]::Show($form, '${escapeForPowerShellSingleQuotes(message)}', '${escapeForPowerShellSingleQuotes(title)}', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null`,
-  ].join('; ');
+  ].join("\r\n");
 
-  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: false,
+  // Written to a temp .ps1 file (rather than passed inline via -Command) so this isn't at the
+  // mercy of command-line length/quoting limits, and -ExecutionPolicy Bypass makes it run even
+  // on machines where PowerShell script execution is locked down by default.
+  let scriptPath;
+  try {
+    scriptPath = path.join(os.tmpdir(), `park-bot-alert-${Date.now()}-${Math.random().toString(36).slice(2)}.ps1`);
+    fs.writeFileSync(scriptPath, script, 'utf8');
+  } catch (e) {
+    console.error(`[notify] could not write popup script: ${e.message}`);
+    return;
+  }
+
+  const child = spawn(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', scriptPath],
+    { detached: true, stdio: 'ignore', windowsHide: true }
+  );
+
+  child.on('error', (e) => {
+    console.error(`[notify] failed to launch the popup window: ${e.message}`);
+    fs.unlink(scriptPath, () => {});
+  });
+  child.on('exit', () => {
+    fs.unlink(scriptPath, () => {});
   });
   child.unref();
 }
@@ -45,11 +67,15 @@ function showLinuxPopup(title, message) {
 
 function showPopup(title, message) {
   console.log(`[notify] ${title}: ${message}`);
-  const platform = os.platform();
-  if (platform === 'win32') {
-    showWindowsPopup(title, message);
-  } else {
-    showLinuxPopup(title, message);
+  try {
+    const platform = os.platform();
+    if (platform === 'win32') {
+      showWindowsPopup(title, message);
+    } else {
+      showLinuxPopup(title, message);
+    }
+  } catch (e) {
+    console.error(`[notify] showPopup failed: ${e.message}`);
   }
 }
 
