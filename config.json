@@ -14,7 +14,7 @@
       "//": "'park' can be a partial name. \"Algonquin\" will automatically match all 9 Algonquin campgrounds.",
       "park": "Algonquin",
       "arrivalDate": "2026-08-05",
-      "departureDate": "2026-08-08",
+      "departureDate": "2026-08-06",
       "partySize": 1,
       "equipment": "Single Tent"
     }
