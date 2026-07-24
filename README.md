@@ -101,4 +101,13 @@ change to take effect.
   each time that happens, which is useful for figuring out what changed.
 - The bot only reports what the site's own "List" view says (down to reading its literal
   "No Available Sites" message), so it's exactly as accurate as looking at the results
-  page yourself.
+  page yourself. To get that accuracy, it starts a completely fresh browser session for
+  every single check — the reservations site was found (through testing) to start silently
+  returning false "nothing available" results after enough searches piled up in one session,
+  and a fresh session is what reliably avoids that. This makes each check take longer
+  (roughly 20-25 seconds per campground) but means every result can be trusted.
+- Because of that, `checkEveryMinutes` needs to be comfortably longer than
+  (number of campgrounds being watched × ~25 seconds), or checks will just run back-to-back
+  with no rest between them. For "Algonquin" (9 campgrounds, ~4 minutes per full check), the
+  default of 15 minutes has plenty of margin; if you're watching many parks at once, raise it
+  accordingly.

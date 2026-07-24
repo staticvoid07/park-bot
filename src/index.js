@@ -9,6 +9,12 @@ const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
 const LOG_DIR = path.join(__dirname, '..', 'logs');
 const RETRY_DELAY_MS = 2 * 60 * 1000;
 
+// The reservations site silently starts returning false "nothing available" results once a
+// browser session has done "enough" searches - confirmed by testing, but the exact trigger
+// isn't a clean fixed count or a clean fixed time window (looks like some kind of rate limit
+// tied to request bursts). A full page reload reliably restores correct results, so rather
+// than try to model the exact threshold, every single check gets a fresh session.
+
 function log(message) {
   console.log(`[${new Date().toLocaleString()}] ${message}`);
 }
@@ -67,6 +73,7 @@ async function runOneCycle(page, watches, notify) {
     for (const parkOptionText of watch.resolvedParks) {
       const description = `${parkOptionText} (${watch.arrivalDate} to ${watch.departureDate})`;
       try {
+        await openHomeAndConsent(page); // Fresh session per check - see note above on why.
         const result = await checkAvailability(page, watch, parkOptionText);
         if (result.available) {
           log(`AVAILABLE: ${description}`);
