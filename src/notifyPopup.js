@@ -19,10 +19,17 @@ function showWindowsPopup(title, message) {
   // Written to a temp .ps1 file (rather than passed inline via -Command) so this isn't at the
   // mercy of command-line length/quoting limits, and -ExecutionPolicy Bypass makes it run even
   // on machines where PowerShell script execution is locked down by default.
+  //
+  // The UTF-8 BOM prefix matters: classic Windows PowerShell (5.1, the one preinstalled on every
+  // Windows 10/11 machine) does not reliably read .ps1 files as UTF-8 without one - it falls back
+  // to the system's codepage. Site/park names here can contain accented characters (e.g. French
+  // names like "Pagwa" -> "Pàgwà"), and without the BOM those bytes get misread, which can corrupt
+  // the script enough to fail to parse - silently, since we previously ignored stdio entirely.
   let scriptPath;
   try {
     scriptPath = path.join(os.tmpdir(), `park-bot-alert-${Date.now()}-${Math.random().toString(36).slice(2)}.ps1`);
-    fs.writeFileSync(scriptPath, script, 'utf8');
+    const BOM = '\uFEFF';
+    fs.writeFileSync(scriptPath, BOM + script, 'utf8');
   } catch (e) {
     console.error(`[notify] could not write popup script: ${e.message}`);
     return;
@@ -30,15 +37,23 @@ function showWindowsPopup(title, message) {
 
   const child = spawn(
     'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', scriptPath],
-    { detached: true, stdio: 'ignore', windowsHide: true }
+    ['-NoProfile', '-NonInteractive', '-Sta', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', scriptPath],
+    { detached: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }
   );
+
+  let stderr = '';
+  let stdout = '';
+  if (child.stdout) child.stdout.on('data', (d) => { stdout += d.toString(); });
+  if (child.stderr) child.stderr.on('data', (d) => { stderr += d.toString(); });
 
   child.on('error', (e) => {
     console.error(`[notify] failed to launch the popup window: ${e.message}`);
     fs.unlink(scriptPath, () => {});
   });
-  child.on('exit', () => {
+  child.on('exit', (code) => {
+    if (code !== 0) {
+      console.error(`[notify] popup script exited with code ${code}${stderr ? `: ${stderr.trim()}` : ''}${stdout ? ` (stdout: ${stdout.trim()})` : ''}`);
+    }
     fs.unlink(scriptPath, () => {});
   });
   child.unref();
