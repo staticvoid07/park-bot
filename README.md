@@ -93,6 +93,16 @@ everything else saying so. To stop the bot, close that window (or press Ctrl+C).
 If you change `config.json` while the bot is running, stop it and start it again for the
 change to take effect.
 
+## Updating
+
+To get the latest fixes/features later on:
+
+**Windows:** double-click `update.bat`.
+**Linux:** run `./update.sh`.
+
+This pulls the latest version from GitHub and reinstalls dependencies. Your `config.json`
+is left untouched either way.
+
 ## Notes
 
 - This machine needs to be turned on and the window left open for alerts to keep coming.
