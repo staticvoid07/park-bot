@@ -18,18 +18,52 @@ async function launchBrowser({ headless = true } = {}) {
   const browser = await chromium.launch({ headless });
   const context = await browser.newContext({ userAgent: USER_AGENT });
   const page = await context.newPage();
-  page.setDefaultTimeout(20000);
+  page.setDefaultTimeout(30000);
   return { browser, context, page };
 }
 
-async function openHomeAndConsent(page) {
-  await page.goto(BASE_URL, { waitUntil: 'networkidle', timeout: 45000 });
-  try {
-    await page.click('text=I Consent', { timeout: 5000 });
-  } catch (e) {
-    // Consent banner not shown (already accepted, or not present) - fine.
+async function detectWaitingRoom(page) {
+  const bodyText = await page.evaluate(() => document.body.innerText).catch(() => '');
+  const title = await page.title().catch(() => '');
+  const haystack = `${title}\n${bodyText}`.toLowerCase();
+  if (haystack.includes('queue-it') || haystack.includes('waiting room') || haystack.includes('you are in line')) {
+    return true;
   }
-  await page.waitForTimeout(800);
+  return false;
+}
+
+async function openHomeAndConsent(page) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await page.goto(BASE_URL, { waitUntil: 'networkidle', timeout: 45000 });
+
+    for (const consentText of ['text=I Consent', 'text=Accept', 'text=Accept All', 'text=I Agree']) {
+      try {
+        await page.click(consentText, { timeout: 3000 });
+        break;
+      } catch (e) {
+        // That particular consent wording wasn't shown - try the next, or none may be needed.
+      }
+    }
+    await page.waitForTimeout(800);
+
+    try {
+      await page.waitForSelector('#park-autocomplete-input', { timeout: 20000 });
+      return; // Page loaded and the search form is ready.
+    } catch (e) {
+      const inWaitingRoom = await detectWaitingRoom(page);
+      if (inWaitingRoom) {
+        throw new Error(
+          'The reservations site is showing a waiting room / queue (it does this during high-traffic periods). Will retry next cycle.'
+        );
+      }
+      if (attempt === 3) {
+        throw new Error(
+          `The reservations site did not show its search form after ${attempt} attempts. It may be slow, down, or its layout may have changed.`
+        );
+      }
+      // Otherwise, loop around and try loading the page again.
+    }
+  }
 }
 
 async function resolveParkOptions(page, searchTerm) {

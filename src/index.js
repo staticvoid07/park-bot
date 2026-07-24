@@ -7,9 +7,14 @@ const { sendNtfyPush } = require('./notifyPush');
 
 const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
 const LOG_DIR = path.join(__dirname, '..', 'logs');
+const RETRY_DELAY_MS = 2 * 60 * 1000;
 
 function log(message) {
   console.log(`[${new Date().toLocaleString()}] ${message}`);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function loadConfig() {
@@ -51,6 +56,7 @@ function loadConfig() {
 }
 
 function saveErrorScreenshot(page, label) {
+  if (!page) return Promise.resolve();
   return page
     .screenshot({ path: path.join(LOG_DIR, `error-${label}-${Date.now()}.png`) })
     .catch(() => {});
@@ -79,51 +85,79 @@ async function runOneCycle(page, watches, notify) {
   }
 }
 
+async function resolveAllParks(page, watches) {
+  log('Resolving park names from config.json...');
+  for (const watch of watches) {
+    try {
+      const options = await resolveParkOptions(page, watch.park);
+      if (options.length === 0) {
+        log(`WARNING: no parks matched "${watch.park}" - this watch will do nothing. Check the spelling in config.json.`);
+      } else {
+        log(`"${watch.park}" matched: ${options.join(', ')}`);
+      }
+      watch.resolvedParks = options;
+    } catch (e) {
+      log(`ERROR resolving "${watch.park}": ${e.message}`);
+      await saveErrorScreenshot(page, 'resolve-parks');
+      watch.resolvedParks = [];
+    }
+  }
+}
+
+// Runs one full session: launch a browser, set it up, then check forever on a timer.
+// Throws if anything goes wrong so the caller can restart a fresh session.
+async function runSession(config) {
+  const { browser, page } = await launchBrowser({ headless: true });
+  try {
+    await openHomeAndConsent(page);
+    await resolveAllParks(page, config.watches);
+
+    if (config.notify.ntfyTopic) {
+      log(`Sending a startup test push to ntfy topic "${config.notify.ntfyTopic}"...`);
+      await sendNtfyPush(
+        config.notify.ntfyTopic,
+        'Park Bot started',
+        'If you see this, your push notifications are set up correctly.'
+      );
+    }
+
+    const intervalMs = config.checkEveryMinutes * 60 * 1000;
+
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      log('Checking availability...');
+      await runOneCycle(page, config.watches, config.notify);
+      log(`Done. Next check in ${config.checkEveryMinutes} minutes. Leave this window open.`);
+      await sleep(intervalMs);
+    }
+  } catch (e) {
+    await saveErrorScreenshot(page, 'session');
+    throw e;
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
 async function main() {
   fs.mkdirSync(LOG_DIR, { recursive: true });
 
   log('Starting park-bot...');
-  const config = loadConfig();
-
-  const { browser, page } = await launchBrowser({ headless: true });
-  await openHomeAndConsent(page);
-
-  log('Resolving park names from config.json...');
-  for (const watch of config.watches) {
-    const options = await resolveParkOptions(page, watch.park);
-    if (options.length === 0) {
-      log(`WARNING: no parks matched "${watch.park}" - this watch will do nothing. Check the spelling in config.json.`);
-    } else {
-      log(`"${watch.park}" matched: ${options.join(', ')}`);
-    }
-    watch.resolvedParks = options;
-  }
-
-  if (config.notify.ntfyTopic) {
-    log(`Sending a startup test push to ntfy topic "${config.notify.ntfyTopic}"...`);
-    await sendNtfyPush(
-      config.notify.ntfyTopic,
-      'Park Bot started',
-      'If you see this, your push notifications are set up correctly.'
-    );
-  }
-
-  const intervalMs = config.checkEveryMinutes * 60 * 1000;
+  const config = loadConfig(); // Fatal (and intentionally not retried) if config.json itself is broken.
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    log('Checking availability...');
-    await runOneCycle(page, config.watches, config.notify);
-    log(`Done. Next check in ${config.checkEveryMinutes} minutes. Leave this window open.`);
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    try {
+      await runSession(config);
+    } catch (e) {
+      log(`ERROR: ${e.message}`);
+      log(`Something went wrong talking to the reservations website. Will try again in ${RETRY_DELAY_MS / 60000} minutes.`);
+      await sleep(RETRY_DELAY_MS);
+    }
   }
-
-  // eslint-disable-next-line no-unreachable
-  await browser.close();
 }
 
 main().catch((e) => {
-  console.error('park-bot crashed:', e.message);
+  console.error('park-bot could not start:', e.message);
   console.error('This window will stay open so you can read the error above.');
   console.error('Press Ctrl+C to close it.');
   setInterval(() => {}, 1 << 30); // keep the process (and window) alive so the error is visible
