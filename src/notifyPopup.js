@@ -7,56 +7,101 @@ function escapeForPowerShellSingleQuotes(str) {
   return String(str).replace(/'/g, "''");
 }
 
-function showWindowsPopup(title, message) {
-  const script = [
-    'Add-Type -AssemblyName System.Windows.Forms',
-    '$form = New-Object System.Windows.Forms.Form',
-    '$form.TopMost = $true',
-    '$form.StartPosition = "CenterScreen"',
-    `[System.Windows.Forms.MessageBox]::Show($form, '${escapeForPowerShellSingleQuotes(message)}', '${escapeForPowerShellSingleQuotes(title)}', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null`,
-  ].join("\r\n");
+function escapeForVbsQuotedString(str) {
+  return String(str).replace(/"/g, '""');
+}
 
-  // Written to a temp .ps1 file (rather than passed inline via -Command) so this isn't at the
-  // mercy of command-line length/quoting limits, and -ExecutionPolicy Bypass makes it run even
-  // on machines where PowerShell script execution is locked down by default.
-  //
-  // The UTF-8 BOM prefix matters: classic Windows PowerShell (5.1, the one preinstalled on every
-  // Windows 10/11 machine) does not reliably read .ps1 files as UTF-8 without one - it falls back
-  // to the system's codepage. Site/park names here can contain accented characters (e.g. French
-  // names like "Pagwa" -> "Pàgwà"), and without the BOM those bytes get misread, which can corrupt
-  // the script enough to fail to parse - silently, since we previously ignored stdio entirely.
-  let scriptPath;
+function runDetachedScript({ scriptPath, contents, encoding, command, args, label, onSpawnError }) {
   try {
-    scriptPath = path.join(os.tmpdir(), `park-bot-alert-${Date.now()}-${Math.random().toString(36).slice(2)}.ps1`);
-    const BOM = '\uFEFF';
-    fs.writeFileSync(scriptPath, BOM + script, 'utf8');
+    fs.writeFileSync(scriptPath, contents, encoding);
   } catch (e) {
-    console.error(`[notify] could not write popup script: ${e.message}`);
+    console.error(`[notify] could not write ${label} script: ${e.message}`);
     return;
   }
 
-  const child = spawn(
-    'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-Sta', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', scriptPath],
-    { detached: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }
-  );
+  const child = spawn(command, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
 
   let stderr = '';
   let stdout = '';
   if (child.stdout) child.stdout.on('data', (d) => { stdout += d.toString(); });
   if (child.stderr) child.stderr.on('data', (d) => { stderr += d.toString(); });
 
+  let spawnFailed = false;
   child.on('error', (e) => {
-    console.error(`[notify] failed to launch the popup window: ${e.message}`);
+    spawnFailed = true;
+    console.error(`[notify] failed to launch the popup window (${label}): ${e.message}`);
     fs.unlink(scriptPath, () => {});
+    if (onSpawnError) onSpawnError();
   });
   child.on('exit', (code) => {
-    if (code !== 0) {
-      console.error(`[notify] popup script exited with code ${code}${stderr ? `: ${stderr.trim()}` : ''}${stdout ? ` (stdout: ${stdout.trim()})` : ''}`);
+    if (spawnFailed) return;
+    // Log on a non-zero exit OR if anything landed on stderr/stdout - a script can throw an
+    // internal error and still exit 0, so a clean exit code alone doesn't mean it worked.
+    if (code !== 0 || stderr.trim() || stdout.trim()) {
+      console.error(
+        `[notify] ${label} popup script exit code ${code}` +
+          `${stderr.trim() ? ` | stderr: ${stderr.trim()}` : ''}` +
+          `${stdout.trim() ? ` | stdout: ${stdout.trim()}` : ''}`
+      );
     }
     fs.unlink(scriptPath, () => {});
   });
   child.unref();
+}
+
+// Primary: VBScript MsgBox via wscript.exe. Deliberately as simple as possible - no .NET, no
+// WinForms, no STA threading requirement - since those were suspected culprits behind a silent
+// failure to display. vbSystemModal (4096) forces it above every other window on the system,
+// a more reliable "can't miss it" guarantee than anything WinForms offers here. wscript.exe
+// ships on every Windows edition, including Home.
+function showWindowsPopupViaVbs(title, message, onSpawnError) {
+  const vbs = `MsgBox "${escapeForVbsQuotedString(message)}", vbOKOnly + vbInformation + vbSystemModal, "${escapeForVbsQuotedString(title)}"`;
+  const scriptPath = path.join(os.tmpdir(), `park-bot-alert-${Date.now()}-${Math.random().toString(36).slice(2)}.vbs`);
+
+  // WSH reliably reads .vbs files as UTF-16LE when a BOM is present - the standard, well-supported
+  // way to give it non-ASCII text (site names can contain accents, e.g. French "Pagwa" -> "Pagwà").
+  const bom = Buffer.from([0xff, 0xfe]);
+  const contents = Buffer.concat([bom, Buffer.from(vbs, 'utf16le')]);
+
+  runDetachedScript({
+    scriptPath,
+    contents,
+    encoding: undefined, // contents is already a Buffer
+    command: 'wscript.exe',
+    args: ['//Nologo', scriptPath],
+    label: 'vbs',
+    onSpawnError,
+  });
+}
+
+// Fallback if wscript.exe itself can't be launched for some reason.
+function showWindowsPopupViaPowerShell(title, message) {
+  const script = [
+    'Add-Type -AssemblyName System.Windows.Forms',
+    '$form = New-Object System.Windows.Forms.Form',
+    '$form.TopMost = $true',
+    '$form.StartPosition = "CenterScreen"',
+    `[System.Windows.Forms.MessageBox]::Show($form, '${escapeForPowerShellSingleQuotes(message)}', '${escapeForPowerShellSingleQuotes(title)}', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null`,
+  ].join('\r\n');
+
+  const scriptPath = path.join(os.tmpdir(), `park-bot-alert-${Date.now()}-${Math.random().toString(36).slice(2)}.ps1`);
+  const bom = '﻿'; // classic Windows PowerShell 5.1 needs this to reliably read the file as UTF-8.
+
+  runDetachedScript({
+    scriptPath,
+    contents: bom + script,
+    encoding: 'utf8',
+    command: 'powershell.exe',
+    args: ['-NoProfile', '-NonInteractive', '-Sta', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', scriptPath],
+    label: 'powershell',
+  });
+}
+
+function showWindowsPopup(title, message) {
+  showWindowsPopupViaVbs(title, message, () => {
+    console.error('[notify] wscript.exe failed to launch, falling back to PowerShell for the popup.');
+    showWindowsPopupViaPowerShell(title, message);
+  });
 }
 
 function showLinuxPopup(title, message) {
